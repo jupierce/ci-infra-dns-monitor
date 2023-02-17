@@ -1,0 +1,59 @@
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: "ci-infra-dns-monitor"
+---
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: ci-infra-dns-monitor
+  namespace: ci-infra-dns-monitor
+  labels:
+    k8s-app: ci-infra-dns-monitor
+spec:
+  selector:
+    matchLabels:
+      name: ci-infra-dns-monitor
+  template:
+    metadata:
+      labels:
+        name: ci-infra-dns-monitor
+    spec:
+      tolerations:
+      - key: node-role.kubernetes.io/ci-builds-worker
+        operator: Exists
+      - key: node-role.kubernetes.io/ci-tests-worker
+        operator: Exists
+      - key: node-role.kubernetes.io/ci-longtests-worker
+        operator: Exists
+      - key: node-role.kubernetes.io/ci-prowjobs-worker
+        operator: Exists
+      containers:
+      - name: dns-monitor
+        image: quay.io/jupierce/infra-dns-monitor:build01
+        imagePullPolicy: Always
+        env:
+        - name: NODE_NAME
+          valueFrom:
+            fieldRef:
+              fieldPath: spec.nodeName
+        - name: CLUSTER_ID
+          value: f17048a4-331e-4386-b8ea-5f12bf1d65d7
+        - name: GOOGLE_APPLICATION_CREDENTIALS
+          value: /tmp/creds/openshift-gce-devel-ci-infra-dns-monitor.json
+        resources:
+          limits:
+            memory: 200Mi
+          requests:
+            cpu: 100m
+            memory: 200Mi
+        volumeMounts:
+        - name: creds
+          mountPath: "/tmp/creds"
+          readOnly: true
+      terminationGracePeriodSeconds: 30
+      volumes:
+      - name: creds
+        secret:
+          secretName: openshift-gce-devel-ci-infra-dns-monitor
