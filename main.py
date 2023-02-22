@@ -1,11 +1,14 @@
 #!/usr/bin/env python3
 
+import base64
+import gzip
 import time
 import queue
 import signal
 import socket
 import threading
 import os
+import re
 from contextlib import closing
 from datetime import datetime
 
@@ -18,18 +21,54 @@ import openshift as oc
 from google.cloud import bigquery
 
 CI_NETWORK_TABLE_ID = 'openshift-gce-devel.ci_analysis_us.infra_network_tests'
-SCHEMA_LEVEL = 1
+SCHEMA_LEVEL = 3
 
 # Track in the database whether the monitor has received a SIGINT yet.
 sigints_received: int = 0
 process_start_time: str
 cluster_id: str
 node_name: str
+test_variant = os.getenv('TEST_VARIANT', '')
+
+node_info: str = None
+ci_workload_active: Optional[bool] = None
+ci_workload: Optional[str] = None
+
+ci_workload_exp = re.compile(r'.*ci-workload=(\w+).*', flags=re.DOTALL)
+
+
+def refresh_node_info():
+    global node_info, ci_workload_active, ci_workload
+    try:
+        raw_node_info = oc.selector(f'node/{node_name}').describe(auto_raise=True)
+        print(f'Successfully queried node/{node_name} information')
+        ci_workload_active = 'ci-op-' in raw_node_info or 'ci-ln-' in raw_node_info
+        if not ci_workload:
+            m = ci_workload_exp.match(raw_node_info)
+            if m:
+                ci_workload = m.group(1)
+        # Compress and encode description to save space in bigquery
+        node_info = base64.b64encode(gzip.compress(bytes(raw_node_info, 'utf-8'))).decode('utf-8')
+    except Exception as e:
+        print(f'Error running oc describe on node {node_name}:\n{e}')
+        node_info = str(e)
+        ci_workload_active = None  # Since we don't actually know whether there is a CI workload or not
+
+
+def poll_node_info():
+    """
+    Updates oc describe of the node. The value is cached so as to not overwhelm the API server
+    and will only update at most every 10 seconds.
+    """
+    while True:
+        refresh_node_info()
+        time.sleep(10)
 
 
 class TestType(Enum):
     DNS_LOOKUP = 'dns_lookup'
     PORT_CHECK = 'port_check'
+    BIGQUERY_ERROR = 'bigquery_error'
 
 
 class TargetHostTest(NamedTuple):
@@ -51,6 +90,9 @@ class ResultRecord(NamedTuple):
     target_host: str
     sigints_received: int
     test_extra: Optional[str]
+    node_info: Optional[str]
+    ci_workload_active: Optional[bool]
+    ci_workload: Optional[str]
 
 
 record_q = queue.Queue()
@@ -61,8 +103,7 @@ def timestamp_str():
 
 
 def monitor_host_port(test_to_run: TargetHostTest) -> ResultRecord:
-    global cluster_id, node_name
-    global process_start_time
+    global cluster_id, node_name, node_info, ci_workload_active, process_start_time, ci_workload
     query_start_time = timestamp_str()
     msg = None
     success = True
@@ -72,7 +113,7 @@ def monitor_host_port(test_to_run: TargetHostTest) -> ResultRecord:
         try:
             sock.settimeout(10.0)
             if sock.connect_ex((test_to_run.hostname, test_to_run.port)) == 0:
-                print(f"Port is open for {test_to_run.hostname}:{test_to_run.port}")
+                print(f"Port is open for {test_to_run.hostname}:{test_to_run.port} {test_variant}")
             else:
                 success = False
                 msg = 'Port is not open'
@@ -90,20 +131,22 @@ def monitor_host_port(test_to_run: TargetHostTest) -> ResultRecord:
         cluster_id=cluster_id,
         node_name=node_name,
         process_start_time=process_start_time,
-        test_type=TestType.PORT_CHECK.value,
+        test_type=TestType.PORT_CHECK.value + test_variant,
         test_start_time=query_start_time,
         test_end_time=query_end_time,
         test_success=success,
         test_msg=msg,
         target_host=test_to_run.hostname,
         sigints_received=sigints_received,
-        test_extra=f'{test_to_run.port}'
+        test_extra=f'{test_to_run.port}',
+        node_info=node_info,
+        ci_workload_active=ci_workload_active,
+        ci_workload=ci_workload,
     )
 
 
 def monitor_dns_lookup(test_to_run: TargetHostTest) -> ResultRecord:
-    global cluster_id, node_name
-    global process_start_time
+    global cluster_id, node_name, node_info, ci_workload_active, process_start_time, ci_workload
     query_start_time = timestamp_str()
     msg = None
     success = True
@@ -111,7 +154,7 @@ def monitor_dns_lookup(test_to_run: TargetHostTest) -> ResultRecord:
 
     try:
         answers = dns.resolver.resolve(test_to_run.hostname)
-        print(f'Resolved {len(answers)} records for {test_to_run.hostname}')
+        print(f'Resolved {len(answers)} records for {test_to_run.hostname} {test_variant}')
         if len(answers) == 0:
             success = False
             msg = 'Zero records returned'
@@ -129,7 +172,7 @@ def monitor_dns_lookup(test_to_run: TargetHostTest) -> ResultRecord:
         cluster_id=cluster_id,
         node_name=node_name,
         process_start_time=process_start_time,
-        test_type=TestType.DNS_LOOKUP.value,
+        test_type=TestType.DNS_LOOKUP.value + test_variant,
         test_start_time=query_start_time,
         test_end_time=query_end_time,
         test_success=success,
@@ -137,10 +180,15 @@ def monitor_dns_lookup(test_to_run: TargetHostTest) -> ResultRecord:
         target_host=test_to_run.hostname,
         sigints_received=sigints_received,
         test_extra=str(len(answers)),
+        node_info=node_info,
+        ci_workload_active=ci_workload_active,
+        ci_workload=ci_workload,
     )
 
 
 def bigquery_writer():
+    global cluster_id, node_name, node_info, ci_workload_active, process_start_time, ci_workload
+
     while True:
         try:
             bq = bigquery.Client()
@@ -159,11 +207,38 @@ def bigquery_writer():
 
                 errors = bq.insert_rows_json(CI_NETWORK_TABLE_ID, record_dicts)
                 if len(errors) > 0:
-                    print(f'Unable to insert bigquery records: {record_dicts}\nerrors={errors}')
+                    print(f'ERROR: Unable to insert bigquery records: {record_dicts}\nerrors={errors}')
+
+                    if len(record_dicts) > 10000:
+                        print(f'ERROR: Discarding rows after repeated fails to insert')
+                    else:
+                        # Re-insert the records and try to write them again later
+                        for error in errors:
+                            record_q.put(records[error['index']])
+
+                    record_q.put(ResultRecord(
+                        schema_level=SCHEMA_LEVEL,
+                        cluster_id=cluster_id,
+                        node_name=node_name,
+                        process_start_time=process_start_time,
+                        test_type=TestType.BIGQUERY_ERROR.value + test_variant,
+                        test_start_time=timestamp_str(),
+                        test_end_time=timestamp_str(),
+                        test_success=False,
+                        test_msg=f'Failed to write {len(errors)} of {len(record_dicts)} records',
+                        target_host='',
+                        sigints_received=0,
+                        test_extra='',
+                        node_info=node_info,
+                        ci_workload_active=ci_workload_active,
+                        ci_workload=ci_workload,
+                    ))
+
                 else:
                     print(f'Wrote {len(record_dicts)} records to bigquery')
         except Exception as e:
             print(f'Error writing to bigquery: {e}')
+            time.sleep(60)
 
 
 def monitor_host(test_to_run: TargetHostTest):
@@ -174,7 +249,7 @@ def monitor_host(test_to_run: TargetHostTest):
             nonlocal success_count
             if record.test_success:
                 success_count += 1
-                if success_count % 500 == 0:
+                if success_count % 100 == 0:
                     record_q.put(record)
             else:
                 # Always record failures
@@ -207,6 +282,8 @@ if __name__ == '__main__':
         print('NODE_NAME environment variable must be set')
         exit(1)
 
+    refresh_node_info()
+
     tests_to_run: List[TargetHostTest] = [
         TargetHostTest('api.build01.ci.devcluster.openshift.com', TestType.PORT_CHECK, 6443),
         TargetHostTest('api.build03.ky4t.p1.openshiftapps.com', TestType.PORT_CHECK, 6443),
@@ -226,6 +303,9 @@ if __name__ == '__main__':
 
     for test in tests_to_run:
         threading.Thread(target=monitor_host, args=(test,)).start()
+
+    node_info_updater = threading.Thread(target=poll_node_info)
+    node_info_updater.start()
 
     writer = threading.Thread(target=bigquery_writer)
     writer.start()
