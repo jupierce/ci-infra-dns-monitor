@@ -21,7 +21,7 @@ import openshift as oc
 from google.cloud import bigquery
 
 CI_NETWORK_TABLE_ID = 'openshift-gce-devel.ci_analysis_us.infra_network_tests'
-SCHEMA_LEVEL = 3
+SCHEMA_LEVEL = 4
 
 # Track in the database whether the monitor has received a SIGINT yet.
 sigints_received: int = 0

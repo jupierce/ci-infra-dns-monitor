@@ -62,15 +62,13 @@ spec:
         operator: Exists
       containers:
       - name: dns-monitor
-        image: quay.io/jupierce/infra-dns-monitor:build01
+        image: quay.io/jupierce/infra-dns-monitor:prod
         imagePullPolicy: Always
         env:
         - name: NODE_NAME
           valueFrom:
             fieldRef:
               fieldPath: spec.nodeName
-        - name: CLUSTER_ID
-          value: f17048a4-331e-4386-b8ea-5f12bf1d65d7
         - name: GOOGLE_APPLICATION_CREDENTIALS
           value: /tmp/creds/openshift-gce-devel-kettle.json
         resources:
@@ -117,15 +115,13 @@ spec:
         operator: Exists
       containers:
       - name: dns-monitor
-        image: quay.io/jupierce/infra-dns-monitor:build01
+        image: quay.io/jupierce/infra-dns-monitor:prod
         imagePullPolicy: Always
         env:
         - name: NODE_NAME
           valueFrom:
             fieldRef:
               fieldPath: spec.nodeName
-        - name: CLUSTER_ID
-          value: f17048a4-331e-4386-b8ea-5f12bf1d65d7
         - name: TEST_VARIANT
           value: "-hostNetwork"
         - name: GOOGLE_APPLICATION_CREDENTIALS
