@@ -21,7 +21,7 @@ import openshift as oc
 from google.cloud import bigquery
 
 CI_NETWORK_TABLE_ID = 'openshift-gce-devel.ci_analysis_us.infra_network_tests'
-SCHEMA_LEVEL = 4
+SCHEMA_LEVEL = 6
 
 # Track in the database whether the monitor has received a SIGINT yet.
 sigints_received: int = 0
@@ -40,17 +40,18 @@ ci_workload_exp = re.compile(r'.*ci-workload=(\w+).*', flags=re.DOTALL)
 def refresh_node_info():
     global node_info, ci_workload_active, ci_workload
     try:
-        raw_node_info = oc.selector(f'node/{node_name}').describe(auto_raise=True)
-        print(f'Successfully queried node/{node_name} information')
-        ci_workload_active = 'ci-op-' in raw_node_info or 'ci-ln-' in raw_node_info
+        node_model = oc.selector(f'node/{node_name}').object().model
+        print(f'Successfully acquired node info for {node_name}')
+        if node_model.spec.unschedulable:
+            ci_workload_active = False
+        else:
+            ci_workload_active = True
+
         if not ci_workload:
-            m = ci_workload_exp.match(raw_node_info)
-            if m:
-                ci_workload = m.group(1)
-        # Compress and encode description to save space in bigquery
-        node_info = base64.b64encode(gzip.compress(bytes(raw_node_info, 'utf-8'))).decode('utf-8')
+            if node_model.metadata.labels['ci-workload']:
+                ci_workload = node_model.metadata.labels['ci-workload']
     except Exception as e:
-        print(f'Error running oc describe on node {node_name}:\n{e}')
+        print(f'Error get node information for {node_name}:\n{e}')
         node_info = str(e)
         ci_workload_active = None  # Since we don't actually know whether there is a CI workload or not
 
