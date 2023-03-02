@@ -4,5 +4,5 @@ RUN pip3 install --upgrade pip
 RUN pip install openshift-client google-cloud-bigquery dnspython scapy
 WORKDIR /monitor
 ADD main.py .
-RUN setcap cap_net_raw+eip /usr/libexec/platform-python3.6
+RUN setcap cap_net_raw+eip `readlink -e /usr/bin/python`
 CMD ["python3", "main.py"]
