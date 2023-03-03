@@ -348,12 +348,12 @@ if __name__ == '__main__':
         TargetHostTest('static.redhat.com', TestType.DNS_LOOKUP, None),
     ]
 
-    dnsservers = dns.resolver.get_default_resolver().nameservers
-    print(f'DNS servers: {dnsservers}')
-    for dnsserver in dnsservers:
-        tests_to_run.append(
-            TargetHostTest(dnsserver, TestType.DNS_PING, None)
-        )
+    # dnsservers = dns.resolver.get_default_resolver().nameservers
+    # print(f'DNS servers: {dnsservers}')
+    # for dnsserver in dnsservers:
+    #     tests_to_run.append(
+    #         TargetHostTest(dnsserver, TestType.DNS_PING, None)
+    #     )
 
     signal.signal(signal.SIGINT, sigint_handler)
 
