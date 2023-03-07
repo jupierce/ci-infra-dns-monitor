@@ -69,6 +69,7 @@ def poll_node_info():
 
 class TestType(Enum):
     DNS_LOOKUP = 'dns_lookup'
+    DNS_TCP_LOOKUP = 'dns_tcp_lookup'
     PORT_CHECK = 'port_check'
     BIGQUERY_ERROR = 'bigquery_error'
 
@@ -157,6 +158,10 @@ def monitor_dns_lookup(test_to_run: TargetHostTest) -> ResultRecord:
     msg = None
     success = True
     answers = []
+    tcp = False
+
+    if test_to_run.test_type is TestType.DNS_TCP_LOOKUP:
+        tcp = True
 
     print(f'Checking DNS connectivity...')
     dnsservers = dns.resolver.get_default_resolver().nameservers
@@ -194,8 +199,8 @@ def monitor_dns_lookup(test_to_run: TargetHostTest) -> ResultRecord:
     #         print(f'Exception: {e}')
 
     try:
-        answers = dns.resolver.resolve(test_to_run.hostname)
-        print(f'Resolved {len(answers)} records for {test_to_run.hostname} {test_variant}')
+        answers = dns.resolver.resolve(test_to_run.hostname, tcp=tcp)
+        print(f'Resolved {len(answers)} records for {test_to_run.hostname} {test_variant} tcp={tcp}')
         if len(answers) == 0:
             success = False
             msg = 'Zero records returned'
@@ -206,14 +211,14 @@ def monitor_dns_lookup(test_to_run: TargetHostTest) -> ResultRecord:
         query_end_time = timestamp_str()
 
     if not success:
-        print(f'Resolution issue {test_to_run.hostname}: {msg}')
+        print(f'Resolution issue {test_to_run.hostname} tcp={tcp}: {msg}')
 
     return ResultRecord(
         schema_level=SCHEMA_LEVEL,
         cluster_id=cluster_id,
         node_name=node_name,
         process_start_time=process_start_time,
-        test_type=TestType.DNS_LOOKUP.value + test_variant,
+        test_type=test_to_run.test_type.value + test_variant,
         test_start_time=query_start_time,
         test_end_time=query_end_time,
         test_success=success,
@@ -302,7 +307,7 @@ def monitor_host(test_to_run: TargetHostTest):
 
         if test_to_run.test_type is TestType.PORT_CHECK:
             add_result(monitor_host_port(test_to_run))
-        elif test_to_run.test_type is TestType.DNS_LOOKUP:
+        elif test_to_run.test_type is TestType.DNS_LOOKUP or test_to_run.test_type is TestType.DNS_TCP_LOOKUP:
             add_result(monitor_dns_lookup(test_to_run))
         else:
             raise IOError(f'Unimplemented test type: {test_to_run.test_type}')
@@ -341,6 +346,12 @@ if __name__ == '__main__':
         TargetHostTest('api.build02.gcp.ci.openshift.org', TestType.DNS_LOOKUP, None),
         TargetHostTest('api.build04.34d2.p2.openshiftapps.com', TestType.DNS_LOOKUP, None),
         TargetHostTest('static.redhat.com', TestType.DNS_LOOKUP, None),
+
+        TargetHostTest('api.build01.ci.devcluster.openshift.com', TestType.DNS_TCP_LOOKUP, None),
+        TargetHostTest('api.build03.ky4t.p1.openshiftapps.com', TestType.DNS_TCP_LOOKUP, None),
+        TargetHostTest('api.build02.gcp.ci.openshift.org', TestType.DNS_TCP_LOOKUP, None),
+        TargetHostTest('api.build04.34d2.p2.openshiftapps.com', TestType.DNS_TCP_LOOKUP, None),
+        TargetHostTest('static.redhat.com', TestType.DNS_TCP_LOOKUP, None),
     ]
     signal.signal(signal.SIGINT, sigint_handler)
 
