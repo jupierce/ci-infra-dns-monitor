@@ -13,6 +13,10 @@ for context in $@ ; do
   echo "Applying to context: ${context}"
   oc --as system:admin delete --context ${context} -n ci-infra-dns-monitor ds/ci-infra-dns-monitor
   oc --as system:admin delete --context ${context} -n ci-infra-dns-monitor ds/ci-infra-dns-monitor-hostnetwork
+  oc --as system:admin delete --context ${context} -n ci-infra-dns-monitor ds/ci-infra-dns-monitor-cluster-first
+  oc --as system:admin delete --context ${context} -n ci-infra-dns-monitor ds/ci-infra-dns-monitor-hostnetwork
+  oc --as system:admin delete --context ${context} -n ci-infra-dns-monitor ds/ci-infra-dns-monitor-hostnetwork-cluster-first
+  oc --as system:admin delete --context ${context} -n ci-infra-dns-monitor ds/ci-infra-dns-monitor-nodedns
   oc --as system:admin apply --context ${context} -f resources.yaml
 
   if ! oc --as system:admin get secrets --context ${context} -n ci-infra-dns-monitor openshift-gce-devel-kettle; then
