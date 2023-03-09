@@ -68,6 +68,7 @@ def poll_node_info():
 
 
 class TestType(Enum):
+    DNS_PING = 'dns_ping'
     DNS_LOOKUP = 'dns_lookup'
     DNS_TCP_LOOKUP = 'dns_tcp_lookup'
     PORT_CHECK = 'port_check'
@@ -96,8 +97,6 @@ class ResultRecord(NamedTuple):
     node_info: Optional[str]
     ci_workload_active: Optional[bool]
     ci_workload: Optional[str]
-    icmp_liveness: Optional[bool]
-    icmp_liveness_msg: Optional[str]
 
 
 record_q = queue.Queue()
@@ -147,8 +146,51 @@ def monitor_host_port(test_to_run: TargetHostTest) -> ResultRecord:
         node_info=node_info,
         ci_workload_active=ci_workload_active,
         ci_workload=ci_workload,
-        icmp_liveness=None,
-        icmp_liveness_msg=None,
+    )
+
+
+def monitor_dns_ping(test_to_run: TargetHostTest) -> ResultRecord:
+    global cluster_id, node_name, node_info, ci_workload_active, process_start_time, ci_workload
+    query_start_time = timestamp_str()
+    msg = None
+    success = False
+    dns_server = test_to_run.hostname
+
+    # ICMP ping the DNS server
+    print(f'Pinging DNS {dns_server}')
+    try:
+        ans, unans = sr(IP(dst=dns_server) / ICMP(), timeout=5.0, verbose=0)
+        ans.summary()
+        # retrieve the summary of the answers
+        if len(ans) > 0:
+            success = True
+            print(f"DNS server {dns_server} is reachable")
+        else:
+            print(f'DNS server {dns_server} is not reachable')
+    except Exception as e:
+        msg = str(e)
+    finally:
+        query_end_time = timestamp_str()
+
+    if not success:
+        print(f'Ping issue {test_to_run.hostname}: {msg}')
+
+    return ResultRecord(
+        schema_level=SCHEMA_LEVEL,
+        cluster_id=cluster_id,
+        node_name=node_name,
+        process_start_time=process_start_time,
+        test_type=TestType.DNS_PING.value + test_variant,
+        test_start_time=query_start_time,
+        test_end_time=query_end_time,
+        test_success=success,
+        test_msg=msg,
+        target_host=test_to_run.hostname,
+        sigints_received=sigints_received,
+        test_extra='',
+        node_info=node_info,
+        ci_workload_active=ci_workload_active,
+        ci_workload=ci_workload,
     )
 
 
@@ -162,41 +204,6 @@ def monitor_dns_lookup(test_to_run: TargetHostTest) -> ResultRecord:
 
     if test_to_run.test_type is TestType.DNS_TCP_LOOKUP:
         tcp = True
-
-    print(f'Checking DNS connectivity...')
-    dnsservers = dns.resolver.get_default_resolver().nameservers
-    print(f'DNS servers: {dnsservers}')
-
-    # ICMP ping the DNS server
-    icmp_liveness = False
-    icmp_liveness_msg = ''
-    print(f'Pinging DNS servers...')
-    for dns_server in dnsservers:
-        print(f'Pinging {dns_server}')
-        try:
-            ans, unans = sr(IP(dst=dns_server) / ICMP(), timeout=1.0, verbose=0)
-            ans.summary()
-            # retrieve the summary of the answers
-            if len(ans) > 0:
-                icmp_liveness = True
-                print(f"DNS server {dns_server} is reachable")
-            else:
-                print(f'DNS server {dns_server} is not reachable')
-        except Exception as e:
-            icmp_liveness_msg = str(e)
-            print(f'ICMP ping exception: {e}')
-
-    # # UDP ping the DNS server port 999
-    # print(f'UDP pinging DNS servers...')
-    # for dns_server in dnsservers:
-    #     print(f'UDP pinging {dns_server}')
-    #     try:
-    #         ans, unans = sr(IP(dst=dns_server) / UDP(dport=0), timeout=1.0, verbose=1)
-    #         udp_liveness_msg = ans.show(dump=True)
-    #         if len(ans) > 0:
-    #             print(f'UDP ping {dns_server} success')
-    #     except Exception as e:
-    #         print(f'Exception: {e}')
 
     try:
         answers = dns.resolver.resolve(test_to_run.hostname, tcp=tcp)
@@ -229,8 +236,6 @@ def monitor_dns_lookup(test_to_run: TargetHostTest) -> ResultRecord:
         node_info=node_info,
         ci_workload_active=ci_workload_active,
         ci_workload=ci_workload,
-        icmp_liveness=icmp_liveness,
-        icmp_liveness_msg=icmp_liveness_msg,
     )
 
 
@@ -280,8 +285,6 @@ def bigquery_writer():
                         node_info=node_info,
                         ci_workload_active=ci_workload_active,
                         ci_workload=ci_workload,
-                        icmp_liveness=None,
-                        icmp_liveness_msg=None,
                     ))
 
                 else:
@@ -309,6 +312,8 @@ def monitor_host(test_to_run: TargetHostTest):
             add_result(monitor_host_port(test_to_run))
         elif test_to_run.test_type is TestType.DNS_LOOKUP or test_to_run.test_type is TestType.DNS_TCP_LOOKUP:
             add_result(monitor_dns_lookup(test_to_run))
+        elif test_to_run.test_type is TestType.DNS_PING:
+            add_result(monitor_dns_ping(test_to_run))
         else:
             raise IOError(f'Unimplemented test type: {test_to_run.test_type}')
         time.sleep(1)  # Limit polling rate
@@ -353,6 +358,14 @@ if __name__ == '__main__':
         TargetHostTest('api.build04.34d2.p2.openshiftapps.com', TestType.DNS_TCP_LOOKUP, None),
         TargetHostTest('static.redhat.com', TestType.DNS_TCP_LOOKUP, None),
     ]
+
+    # dnsservers = dns.resolver.get_default_resolver().nameservers
+    # print(f'DNS servers: {dnsservers}')
+    # for dnsserver in dnsservers:
+    #     tests_to_run.append(
+    #         TargetHostTest(dnsserver, TestType.DNS_PING, None)
+    #     )
+
     signal.signal(signal.SIGINT, sigint_handler)
 
     in_q = queue.Queue()

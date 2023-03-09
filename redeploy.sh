@@ -10,6 +10,8 @@ docker tag dns-monitor quay.io/jupierce/infra-dns-monitor:prod
 docker push quay.io/jupierce/infra-dns-monitor:prod
 
 for context in $@ ; do
+  echo
+  echo
   echo "Applying to context: ${context}"
   oc --as system:admin delete --context ${context} -n ci-infra-dns-monitor ds/ci-infra-dns-monitor
   oc --as system:admin delete --context ${context} -n ci-infra-dns-monitor ds/ci-infra-dns-monitor-hostnetwork
