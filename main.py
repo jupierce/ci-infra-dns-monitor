@@ -196,7 +196,7 @@ def monitor_dns_lookup(test_to_run: TargetHostTest) -> ResultRecord:
         ci_workload=ci_workload,
     )
 
-def _get_dns_pod_ip_addresses() -> list[str]:
+def _get_dns_pod_ip_addresses() -> List[str]:
     with oc.project('openshift-dns'):
         get_conditions = lambda x: x.get('status', {}).get('conditions', [])
         get_condition = lambda x: [i.get('status') for i in x if i.get('type') == 'Ready']
