@@ -196,7 +196,8 @@ def monitor_dns_lookup(test_to_run: TargetHostTest) -> ResultRecord:
         ci_workload=ci_workload,
     )
 
-def _get_dns_pod_ip_addresses() -> list[str]:
+
+def _get_dns_pod_ip_addresses() -> List[str]:
     with oc.project('openshift-dns'):
         get_conditions = lambda x: x.get('status', {}).get('conditions', [])
         get_condition = lambda x: [i.get('status') for i in x if i.get('type') == 'Ready']
@@ -211,6 +212,7 @@ def _get_dns_pod_ip_addresses() -> list[str]:
         ip_addresses = [ip for ip in ip_addresses if ip is not None]
         print(f'Found {len(ip_addresses)} DNS pods IP addresses')
         return ip_addresses
+
 
 def prob_dns_pod_liveness_icmp(test_to_run: TargetHostTest) -> ResultRecord:
     global cluster_id, node_name, node_info, ci_workload_active, process_start_time, ci_workload
@@ -260,6 +262,7 @@ def prob_dns_pod_liveness_icmp(test_to_run: TargetHostTest) -> ResultRecord:
         ci_workload=ci_workload,
     )
 
+
 def prob_dns_pod_liveness_udp(test_to_run: TargetHostTest) -> ResultRecord:
     global cluster_id, node_name, node_info, ci_workload_active, process_start_time, ci_workload
     print(f'Checking DNS pod connectivity by UDP...')
@@ -306,6 +309,7 @@ def prob_dns_pod_liveness_udp(test_to_run: TargetHostTest) -> ResultRecord:
         ci_workload=ci_workload,
     )
 
+
 def prob_dns_pod_liveness_tcp(test_to_run: TargetHostTest) -> ResultRecord:
     global cluster_id, node_name, node_info, ci_workload_active, process_start_time, ci_workload
     print(f'Checking DNS pod connectivity by TCP...')
@@ -350,6 +354,7 @@ def prob_dns_pod_liveness_tcp(test_to_run: TargetHostTest) -> ResultRecord:
         ci_workload_active=ci_workload_active,
         ci_workload=ci_workload,
     )
+
 
 def bigquery_writer():
     global cluster_id, node_name, node_info, ci_workload_active, process_start_time, ci_workload
