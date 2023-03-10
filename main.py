@@ -11,12 +11,13 @@ import os
 import re
 from contextlib import closing
 from datetime import datetime
+import json
 
 from enum import Enum
 from typing import NamedTuple, List, Optional
 
 import dns.resolver
-from scapy.all import sr, IP, ICMP, UDP
+from scapy.all import sr1, IP, ICMP, UDP, TCP
 import openshift as oc
 
 from google.cloud import bigquery
@@ -72,6 +73,9 @@ class TestType(Enum):
     DNS_TCP_LOOKUP = 'dns_tcp_lookup'
     PORT_CHECK = 'port_check'
     BIGQUERY_ERROR = 'bigquery_error'
+    LIVENESS_PROBE_ICMP = 'liveness_probe_icmp'
+    LIVENESS_PROBE_TCP = 'liveness_probe_tcp'
+    LIVENESS_PROBE_UDP = 'liveness_probe_udp'
 
 
 class TargetHostTest(NamedTuple):
@@ -96,8 +100,6 @@ class ResultRecord(NamedTuple):
     node_info: Optional[str]
     ci_workload_active: Optional[bool]
     ci_workload: Optional[str]
-    icmp_liveness: Optional[bool]
-    icmp_liveness_msg: Optional[str]
 
 
 record_q = queue.Queue()
@@ -147,8 +149,6 @@ def monitor_host_port(test_to_run: TargetHostTest) -> ResultRecord:
         node_info=node_info,
         ci_workload_active=ci_workload_active,
         ci_workload=ci_workload,
-        icmp_liveness=None,
-        icmp_liveness_msg=None,
     )
 
 
@@ -162,41 +162,6 @@ def monitor_dns_lookup(test_to_run: TargetHostTest) -> ResultRecord:
 
     if test_to_run.test_type is TestType.DNS_TCP_LOOKUP:
         tcp = True
-
-    print(f'Checking DNS connectivity...')
-    dnsservers = dns.resolver.get_default_resolver().nameservers
-    print(f'DNS servers: {dnsservers}')
-
-    # ICMP ping the DNS server
-    icmp_liveness = False
-    icmp_liveness_msg = ''
-    print(f'Pinging DNS servers...')
-    for dns_server in dnsservers:
-        print(f'Pinging {dns_server}')
-        try:
-            ans, unans = sr(IP(dst=dns_server) / ICMP(), timeout=1.0, verbose=0)
-            ans.summary()
-            # retrieve the summary of the answers
-            if len(ans) > 0:
-                icmp_liveness = True
-                print(f"DNS server {dns_server} is reachable")
-            else:
-                print(f'DNS server {dns_server} is not reachable')
-        except Exception as e:
-            icmp_liveness_msg = str(e)
-            print(f'ICMP ping exception: {e}')
-
-    # # UDP ping the DNS server port 999
-    # print(f'UDP pinging DNS servers...')
-    # for dns_server in dnsservers:
-    #     print(f'UDP pinging {dns_server}')
-    #     try:
-    #         ans, unans = sr(IP(dst=dns_server) / UDP(dport=0), timeout=1.0, verbose=1)
-    #         udp_liveness_msg = ans.show(dump=True)
-    #         if len(ans) > 0:
-    #             print(f'UDP ping {dns_server} success')
-    #     except Exception as e:
-    #         print(f'Exception: {e}')
 
     try:
         answers = dns.resolver.resolve(test_to_run.hostname, tcp=tcp)
@@ -229,10 +194,162 @@ def monitor_dns_lookup(test_to_run: TargetHostTest) -> ResultRecord:
         node_info=node_info,
         ci_workload_active=ci_workload_active,
         ci_workload=ci_workload,
-        icmp_liveness=icmp_liveness,
-        icmp_liveness_msg=icmp_liveness_msg,
     )
 
+def _get_dns_pod_ip_addresses() -> list[str]:
+    with oc.project('openshift-dns'):
+        get_conditions = lambda x: x.get('status', {}).get('conditions', [])
+        get_condition = lambda x: [i.get('status') for i in x if i.get('type') == 'Ready']
+        is_ready = lambda x: get_condition(get_conditions(x)) == ['True']
+
+        pods = oc.selector('pod').objects()
+        pods = [pod for pod in pods if pod.name().startswith('dns-default')]
+        pods = [pod for pod in pods if is_ready(pod.as_dict())]
+
+        ip_addresses = [pod.as_dict().get('status', {}).get('podIP') for pod in pods]
+        print(f'Found {len(ip_addresses)} DNS pods')
+        ip_addresses = [ip for ip in ip_addresses if ip is not None]
+        print(f'Found {len(ip_addresses)} DNS pods IP addresses')
+        return ip_addresses
+
+def prob_dns_pod_liveness_icmp(test_to_run: TargetHostTest) -> ResultRecord:
+    global cluster_id, node_name, node_info, ci_workload_active, process_start_time, ci_workload
+
+    print(f'Checking DNS pod connectivity by ICMP...')
+    query_start_time = timestamp_str()
+    # Retrieve the DNS pods
+    ip_addresses = _get_dns_pod_ip_addresses()
+
+    # ICMP ping the DNS server
+    reachable = []
+    print(f'Pinging DNS pods...')
+    success = True
+    for dns_server in ip_addresses:
+        print(f'Pinging {dns_server}')
+        ans = sr1(IP(dst=dns_server) / ICMP(), timeout=1.0, verbose=1)
+        if not ans:
+            print(f'Response: no answer')
+        else:
+            print(f'Response: {ans.summary()}')
+        # retrieve the summary of the answers
+        if ans and ans.haslayer(ICMP) and ans[ICMP].type == 0:
+            print(f"DNS server {dns_server} is reachable")
+            reachable.append(dns_server)
+        else:
+            print(f'DNS server {dns_server} is not reachable')
+        success = False
+    query_end_time = timestamp_str()
+    return ResultRecord(
+        schema_level=SCHEMA_LEVEL,
+        cluster_id=cluster_id,
+        node_name=node_name,
+        process_start_time=process_start_time,
+        test_type=TestType.LIVENESS_PROBE_ICMP,
+        test_start_time=query_start_time,
+        test_end_time=query_end_time,
+        test_success=success,
+        test_msg=f'ICMP pinged {len(ip_addresses)} DNS pods, {len(reachable)} reachable, {len(ip_addresses)-len(reachable)} unreachable',
+        target_host='',
+        sigints_received=sigints_received,
+        test_extra=json.dumps({
+            'reachable': reachable,
+            'unreachable': [ip for ip in ip_addresses if ip not in reachable],
+        }),
+        node_info=node_info,
+        ci_workload_active=ci_workload_active,
+        ci_workload=ci_workload,
+    )
+
+def prob_dns_pod_liveness_udp(test_to_run: TargetHostTest) -> ResultRecord:
+    global cluster_id, node_name, node_info, ci_workload_active, process_start_time, ci_workload
+    print(f'Checking DNS pod connectivity by UDP...')
+    query_start_time = timestamp_str()
+    # Retrieve the DNS pods
+    ip_addresses = _get_dns_pod_ip_addresses()
+
+    # UDP ping the DNS server
+    print(f'UDP pinging DNS servers...')
+    reachable = []
+    success = True
+    for dns_server in ip_addresses:
+        print(f'UDP pinging {dns_server}')
+        ans = sr1(IP(dst=dns_server) / UDP(dport=0), timeout=1.0, verbose=1)
+        if not ans:
+            print(f'Response: no answer')
+        else:
+            print(f'Response: {ans.summary()}')
+        if ans and ans[ICMP].type == 3 and ans[ICMP].code == 3:
+            print(f'DNS server {dns_server} is reachable')
+            reachable.append(dns_server)
+        else:
+            print(f'DNS server {dns_server} is not reachable')
+            success = False
+    query_end_time = timestamp_str()
+    return ResultRecord(
+        schema_level=SCHEMA_LEVEL,
+        cluster_id=cluster_id,
+        node_name=node_name,
+        process_start_time=process_start_time,
+        test_type=TestType.LIVENESS_PROBE_UDP,
+        test_start_time=query_start_time,
+        test_end_time=query_end_time,
+        test_success=success,
+        test_msg=f'UDP pinged {len(ip_addresses)} DNS pods, {len(reachable)} reachable, {len(ip_addresses)-len(reachable)} unreachable',
+        target_host='',
+        sigints_received=sigints_received,
+        test_extra=json.dumps({
+            'reachable': reachable,
+            'unreachable': [ip for ip in ip_addresses if ip not in reachable],
+        }),
+        node_info=node_info,
+        ci_workload_active=ci_workload_active,
+        ci_workload=ci_workload,
+    )
+
+def prob_dns_pod_liveness_tcp(test_to_run: TargetHostTest) -> ResultRecord:
+    global cluster_id, node_name, node_info, ci_workload_active, process_start_time, ci_workload
+    print(f'Checking DNS pod connectivity by TCP...')
+    query_start_time = timestamp_str()
+    # Retrieve the DNS pods
+    ip_addresses = _get_dns_pod_ip_addresses()
+
+    # TCP ping the DNS server
+    print(f'TCP pinging DNS servers...')
+    reachable = []
+    success = True
+    for dns_server in ip_addresses:
+        print(f'TCP pinging {dns_server}')
+        ans = sr1(IP(dst=dns_server) / TCP(dport=53, flags='S'), timeout=1.0, verbose=1)
+        if not ans:
+            print(f'Response: no answer')
+        else:
+            print(f'Response: {ans.summary()}')
+        if ans and ans.haslayer(TCP) and ans[TCP].flags == 'SA':
+            print(f'DNS server {dns_server} is reachable')
+        else:
+            print(f'DNS server {dns_server} is not reachable')
+
+    query_end_time = timestamp_str()
+    return ResultRecord(
+        schema_level=SCHEMA_LEVEL,
+        cluster_id=cluster_id,
+        node_name=node_name,
+        process_start_time=process_start_time,
+        test_type=TestType.LIVENESS_PROBE_TCP,
+        test_start_time=query_start_time,
+        test_end_time=query_end_time,
+        test_success=success,
+        test_msg=f'TCP pinged {len(ip_addresses)} DNS pods, {len(reachable)} reachable, {len(ip_addresses)-len(reachable)} unreachable',
+        target_host='',
+        sigints_received=sigints_received,
+        test_extra=json.dumps({
+            'reachable': reachable,
+            'unreachable': [ip for ip in ip_addresses if ip not in reachable],
+        }),
+        node_info=node_info,
+        ci_workload_active=ci_workload_active,
+        ci_workload=ci_workload,
+    )
 
 def bigquery_writer():
     global cluster_id, node_name, node_info, ci_workload_active, process_start_time, ci_workload
@@ -280,8 +397,6 @@ def bigquery_writer():
                         node_info=node_info,
                         ci_workload_active=ci_workload_active,
                         ci_workload=ci_workload,
-                        icmp_liveness=None,
-                        icmp_liveness_msg=None,
                     ))
 
                 else:
@@ -291,7 +406,7 @@ def bigquery_writer():
             time.sleep(60)
 
 
-def monitor_host(test_to_run: TargetHostTest):
+def monitor_host(test_to_run: TargetHostTest, delay: int=1):
     success_count: int = 0
     while True:
 
@@ -309,9 +424,15 @@ def monitor_host(test_to_run: TargetHostTest):
             add_result(monitor_host_port(test_to_run))
         elif test_to_run.test_type is TestType.DNS_LOOKUP or test_to_run.test_type is TestType.DNS_TCP_LOOKUP:
             add_result(monitor_dns_lookup(test_to_run))
+        elif test_to_run.test_type is TestType.LIVENESS_PROBE_ICMP:
+            add_result(prob_dns_pod_liveness_icmp(test_to_run))
+        elif test_to_run.test_type is TestType.LIVENESS_PROBE_TCP:
+            add_result(prob_dns_pod_liveness_tcp(test_to_run))
+        elif test_to_run.test_type is TestType.LIVENESS_PROBE_UDP:
+            add_result(prob_dns_pod_liveness_udp(test_to_run))
         else:
             raise IOError(f'Unimplemented test type: {test_to_run.test_type}')
-        time.sleep(1)  # Limit polling rate
+        time.sleep(delay)  # Limit polling rate
 
 
 def sigint_handler(signum, frame):
@@ -331,6 +452,8 @@ if __name__ == '__main__':
     if not node_name:
         print('NODE_NAME environment variable must be set')
         exit(1)
+
+    delay = int(os.getenv('DELAY', '1'))
 
     refresh_node_info()
 
@@ -352,13 +475,18 @@ if __name__ == '__main__':
         TargetHostTest('api.build02.gcp.ci.openshift.org', TestType.DNS_TCP_LOOKUP, None),
         TargetHostTest('api.build04.34d2.p2.openshiftapps.com', TestType.DNS_TCP_LOOKUP, None),
         TargetHostTest('static.redhat.com', TestType.DNS_TCP_LOOKUP, None),
+
+        TargetHostTest('', TestType.LIVENESS_PROBE_ICMP, None),
+        TargetHostTest('', TestType.LIVENESS_PROBE_UDP, None),
+        # TargetHostTest('', TestType.LIVENESS_PROBE_TCP, None),
     ]
     signal.signal(signal.SIGINT, sigint_handler)
 
     in_q = queue.Queue()
 
     for test in tests_to_run:
-        threading.Thread(target=monitor_host, args=(test,)).start()
+        threading.Thread(target=monitor_host, args=(test, delay)).start()
+        # monitor_host(test, delay)
 
     node_info_updater = threading.Thread(target=poll_node_info)
     node_info_updater.start()
