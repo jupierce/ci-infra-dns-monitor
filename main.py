@@ -9,6 +9,10 @@ import socket
 import threading
 import os
 import re
+import traceback
+
+import urllib3
+import requests
 from contextlib import closing
 from datetime import datetime
 import json
@@ -20,52 +24,14 @@ import dns.resolver
 from scapy.all import sr1, IP, ICMP, UDP, TCP
 import openshift as oc
 
-from google.cloud import bigquery
-
-CI_NETWORK_TABLE_ID = 'openshift-gce-devel.ci_analysis_us.infra_network_tests'
-SCHEMA_LEVEL = 6
-
-# Track in the database whether the monitor has received a SIGINT yet.
+# Records whether the monitor has received a SIGINT yet.
 sigints_received: int = 0
 process_start_time: str
 cluster_id: str
 node_name: str
 test_variant = os.getenv('TEST_VARIANT', '')
 
-node_info: str = None
-ci_workload_active: Optional[bool] = None
-ci_workload: Optional[str] = None
-
-ci_workload_exp = re.compile(r'.*ci-workload=(\w+).*', flags=re.DOTALL)
-
-
-def refresh_node_info():
-    global node_info, ci_workload_active, ci_workload
-    try:
-        node_model = oc.selector(f'node/{node_name}').object().model
-        print(f'Successfully acquired node info for {node_name}')
-        if node_model.spec.unschedulable:
-            ci_workload_active = False
-        else:
-            ci_workload_active = True
-
-        if not ci_workload:
-            if node_model.metadata.labels['ci-workload']:
-                ci_workload = node_model.metadata.labels['ci-workload']
-    except Exception as e:
-        print(f'Error get node information for {node_name}:\n{e}')
-        node_info = str(e)
-        ci_workload_active = None  # Since we don't actually know whether there is a CI workload or not
-
-
-def poll_node_info():
-    """
-    Updates oc describe of the node. The value is cached so as to not overwhelm the API server
-    and will only update at most every 10 seconds.
-    """
-    while True:
-        refresh_node_info()
-        time.sleep(10)
+SCHEMA_LEVEL = 0
 
 
 class TestType(Enum):
@@ -76,12 +42,14 @@ class TestType(Enum):
     LIVENESS_PROBE_ICMP = 'liveness_probe_icmp'
     LIVENESS_PROBE_TCP = 'liveness_probe_tcp'
     LIVENESS_PROBE_UDP = 'liveness_probe_udp'
+    HTTP_READ = 'http_read'
 
 
 class TargetHostTest(NamedTuple):
     hostname: str
     test_type: TestType
     port: Optional[int]
+    bearer: Optional[str]
 
 
 class ResultRecord(NamedTuple):
@@ -97,12 +65,6 @@ class ResultRecord(NamedTuple):
     target_host: str
     sigints_received: int
     test_extra: Optional[str]
-    node_info: Optional[str]
-    ci_workload_active: Optional[bool]
-    ci_workload: Optional[str]
-
-
-record_q = queue.Queue()
 
 
 def timestamp_str():
@@ -110,7 +72,7 @@ def timestamp_str():
 
 
 def monitor_host_port(test_to_run: TargetHostTest) -> ResultRecord:
-    global cluster_id, node_name, node_info, ci_workload_active, process_start_time, ci_workload
+    global cluster_id, node_name, process_start_time
     query_start_time = timestamp_str()
     msg = None
     success = True
@@ -145,15 +107,12 @@ def monitor_host_port(test_to_run: TargetHostTest) -> ResultRecord:
         test_msg=msg,
         target_host=test_to_run.hostname,
         sigints_received=sigints_received,
-        test_extra=f'{test_to_run.port}',
-        node_info=node_info,
-        ci_workload_active=ci_workload_active,
-        ci_workload=ci_workload,
+        test_extra=f'{test_to_run.port}'
     )
 
 
 def monitor_dns_lookup(test_to_run: TargetHostTest) -> ResultRecord:
-    global cluster_id, node_name, node_info, ci_workload_active, process_start_time, ci_workload
+    global cluster_id, node_name, process_start_time
     query_start_time = timestamp_str()
     msg = None
     success = True
@@ -191,9 +150,6 @@ def monitor_dns_lookup(test_to_run: TargetHostTest) -> ResultRecord:
         target_host=test_to_run.hostname,
         sigints_received=sigints_received,
         test_extra=str(len(answers)),
-        node_info=node_info,
-        ci_workload_active=ci_workload_active,
-        ci_workload=ci_workload,
     )
 
 
@@ -214,8 +170,42 @@ def _get_dns_pod_ip_addresses() -> List[str]:
         return ip_addresses
 
 
-def prob_dns_pod_liveness_icmp(test_to_run: TargetHostTest) -> ResultRecord:
-    global cluster_id, node_name, node_info, ci_workload_active, process_start_time, ci_workload
+def http_read(test_to_run: TargetHostTest) -> ResultRecord:
+    global cluster_id, node_name, process_start_time
+    headers = dict()
+    if test_to_run.bearer:
+        headers['Authorization'] = f'Bearer {test_to_run.bearer}'
+    start_time = timestamp_str()
+    success = False
+    status_code = -1
+    msg = ''
+    try:
+        response = requests.get(test_to_run.hostname, headers=headers, verify=False, timeout=5)
+        status_code = response.status_code
+        success = status_code == 200
+    except Exception as e:
+        traceback.print_exc()
+        msg = str(e)
+
+    end_time = timestamp_str()
+    return ResultRecord(
+        schema_level=SCHEMA_LEVEL,
+        cluster_id=cluster_id,
+        node_name=node_name,
+        process_start_time=process_start_time,
+        test_type=test_to_run.test_type,
+        test_start_time=start_time,
+        test_end_time=end_time,
+        test_success=success,
+        test_msg=msg,
+        target_host=test_to_run.hostname,
+        sigints_received=sigints_received,
+        test_extra=str(status_code)
+    )
+
+
+def prob_dns_pod_liveness_icmp(_: TargetHostTest) -> ResultRecord:
+    global cluster_id, node_name, process_start_time
 
     print(f'Checking DNS pod connectivity by ICMP...')
     query_start_time = timestamp_str()
@@ -256,15 +246,12 @@ def prob_dns_pod_liveness_icmp(test_to_run: TargetHostTest) -> ResultRecord:
         test_extra=json.dumps({
             'reachable': reachable,
             'unreachable': [ip for ip in ip_addresses if ip not in reachable],
-        }),
-        node_info=node_info,
-        ci_workload_active=ci_workload_active,
-        ci_workload=ci_workload,
+        })
     )
 
 
-def prob_dns_pod_liveness_udp(test_to_run: TargetHostTest) -> ResultRecord:
-    global cluster_id, node_name, node_info, ci_workload_active, process_start_time, ci_workload
+def prob_dns_pod_liveness_udp(_: TargetHostTest) -> ResultRecord:
+    global cluster_id, node_name, process_start_time
     print(f'Checking DNS pod connectivity by UDP...')
     query_start_time = timestamp_str()
     # Retrieve the DNS pods
@@ -304,14 +291,11 @@ def prob_dns_pod_liveness_udp(test_to_run: TargetHostTest) -> ResultRecord:
             'reachable': reachable,
             'unreachable': [ip for ip in ip_addresses if ip not in reachable],
         }),
-        node_info=node_info,
-        ci_workload_active=ci_workload_active,
-        ci_workload=ci_workload,
     )
 
 
-def prob_dns_pod_liveness_tcp(test_to_run: TargetHostTest) -> ResultRecord:
-    global cluster_id, node_name, node_info, ci_workload_active, process_start_time, ci_workload
+def prob_dns_pod_liveness_tcp(_: TargetHostTest) -> ResultRecord:
+    global cluster_id, node_name, process_start_time
     print(f'Checking DNS pod connectivity by TCP...')
     query_start_time = timestamp_str()
     # Retrieve the DNS pods
@@ -349,104 +333,53 @@ def prob_dns_pod_liveness_tcp(test_to_run: TargetHostTest) -> ResultRecord:
         test_extra=json.dumps({
             'reachable': reachable,
             'unreachable': [ip for ip in ip_addresses if ip not in reachable],
-        }),
-        node_info=node_info,
-        ci_workload_active=ci_workload_active,
-        ci_workload=ci_workload,
+        })
     )
 
 
-def bigquery_writer():
-    global cluster_id, node_name, node_info, ci_workload_active, process_start_time, ci_workload
-
-    while True:
-        try:
-            bq = bigquery.Client()
-            while True:
-                if not sigints_received:
-                    time.sleep(5)  # Limit polling rate
-
-                # Gather all records in the queue so they can be transferred with a single bigquery write.
-                records = [record_q.get()]
-                while not record_q.empty():
-                    records.append(record_q.get())
-
-                record_dicts = []
-                for record in records:
-                    record_dicts.append(record._asdict())
-
-                errors = bq.insert_rows_json(CI_NETWORK_TABLE_ID, record_dicts)
-                if len(errors) > 0:
-                    print(f'ERROR: Unable to insert bigquery records: {record_dicts}\nerrors={errors}')
-
-                    if len(record_dicts) > 10000:
-                        print(f'ERROR: Discarding rows after repeated fails to insert')
-                    else:
-                        # Re-insert the records and try to write them again later
-                        for error in errors:
-                            record_q.put(records[error['index']])
-
-                    record_q.put(ResultRecord(
-                        schema_level=SCHEMA_LEVEL,
-                        cluster_id=cluster_id,
-                        node_name=node_name,
-                        process_start_time=process_start_time,
-                        test_type=TestType.BIGQUERY_ERROR.value + test_variant,
-                        test_start_time=timestamp_str(),
-                        test_end_time=timestamp_str(),
-                        test_success=False,
-                        test_msg=f'Failed to write {len(errors)} of {len(record_dicts)} records',
-                        target_host='',
-                        sigints_received=0,
-                        test_extra='',
-                        node_info=node_info,
-                        ci_workload_active=ci_workload_active,
-                        ci_workload=ci_workload,
-                    ))
-
-                else:
-                    print(f'Wrote {len(record_dicts)} records to bigquery')
-        except Exception as e:
-            print(f'Error writing to bigquery: {e}')
-            time.sleep(60)
-
-
-def monitor_host(test_to_run: TargetHostTest, delay: int=1):
+def monitor_host(test_to_run: TargetHostTest, delay: int = 1):
     success_count: int = 0
     while True:
 
         def add_result(record: ResultRecord):
             nonlocal success_count
             if record.test_success:
+                if success_count % 60 == 0:
+                    print(f'Success: {record}')
                 success_count += 1
-                if success_count % 100 == 0:
-                    record_q.put(record)
             else:
                 # Always record failures
-                record_q.put(record)
+                print(f'ERROR: {record}')
+                success_count = 0
 
-        if test_to_run.test_type is TestType.PORT_CHECK:
-            add_result(monitor_host_port(test_to_run))
-        elif test_to_run.test_type is TestType.DNS_LOOKUP or test_to_run.test_type is TestType.DNS_TCP_LOOKUP:
-            add_result(monitor_dns_lookup(test_to_run))
-        elif test_to_run.test_type is TestType.LIVENESS_PROBE_ICMP:
-            add_result(prob_dns_pod_liveness_icmp(test_to_run))
-        elif test_to_run.test_type is TestType.LIVENESS_PROBE_TCP:
-            add_result(prob_dns_pod_liveness_tcp(test_to_run))
-        elif test_to_run.test_type is TestType.LIVENESS_PROBE_UDP:
-            add_result(prob_dns_pod_liveness_udp(test_to_run))
-        else:
-            raise IOError(f'Unimplemented test type: {test_to_run.test_type}')
+        try:
+            if test_to_run.test_type is TestType.PORT_CHECK:
+                add_result(monitor_host_port(test_to_run))
+            elif test_to_run.test_type is TestType.DNS_LOOKUP or test_to_run.test_type is TestType.DNS_TCP_LOOKUP:
+                add_result(monitor_dns_lookup(test_to_run))
+            elif test_to_run.test_type is TestType.LIVENESS_PROBE_ICMP:
+                add_result(prob_dns_pod_liveness_icmp(test_to_run))
+            elif test_to_run.test_type is TestType.LIVENESS_PROBE_TCP:
+                add_result(prob_dns_pod_liveness_tcp(test_to_run))
+            elif test_to_run.test_type is TestType.LIVENESS_PROBE_UDP:
+                add_result(prob_dns_pod_liveness_udp(test_to_run))
+            elif test_to_run.test_type is TestType.HTTP_READ:
+                add_result(http_read(test_to_run))
+            else:
+                raise IOError(f'Unimplemented test type: {test_to_run.test_type}')
+        except Exception:
+            traceback.print_exc()
         time.sleep(delay)  # Limit polling rate
 
 
-def sigint_handler(signum, frame):
+def sigint_handler(_, __):
     global sigints_received
     sigints_received += 1
     print(f'SIGINT received: {sigints_received}')
 
 
 if __name__ == '__main__':
+    urllib3.disable_warnings()
     process_start_time = timestamp_str()
 
     cluster_id = os.getenv('CLUSTER_ID')
@@ -458,32 +391,15 @@ if __name__ == '__main__':
         print('NODE_NAME environment variable must be set')
         exit(1)
 
+    token = oc.get_auth_token()
+
     delay = int(os.getenv('DELAY', '1'))
 
-    refresh_node_info()
-
     tests_to_run: List[TargetHostTest] = [
-        TargetHostTest('api.build01.ci.devcluster.openshift.com', TestType.PORT_CHECK, 6443),
-        TargetHostTest('api.build03.ky4t.p1.openshiftapps.com', TestType.PORT_CHECK, 6443),
-        TargetHostTest('api.build02.gcp.ci.openshift.org', TestType.PORT_CHECK, 6443),
-        TargetHostTest('api.build04.34d2.p2.openshiftapps.com', TestType.PORT_CHECK, 6443),
-        TargetHostTest('static.redhat.com', TestType.PORT_CHECK, 80),
-
-        TargetHostTest('api.build01.ci.devcluster.openshift.com', TestType.DNS_LOOKUP, None),
-        TargetHostTest('api.build03.ky4t.p1.openshiftapps.com', TestType.DNS_LOOKUP, None),
-        TargetHostTest('api.build02.gcp.ci.openshift.org', TestType.DNS_LOOKUP, None),
-        TargetHostTest('api.build04.34d2.p2.openshiftapps.com', TestType.DNS_LOOKUP, None),
-        TargetHostTest('static.redhat.com', TestType.DNS_LOOKUP, None),
-
-        TargetHostTest('api.build01.ci.devcluster.openshift.com', TestType.DNS_TCP_LOOKUP, None),
-        TargetHostTest('api.build03.ky4t.p1.openshiftapps.com', TestType.DNS_TCP_LOOKUP, None),
-        TargetHostTest('api.build02.gcp.ci.openshift.org', TestType.DNS_TCP_LOOKUP, None),
-        TargetHostTest('api.build04.34d2.p2.openshiftapps.com', TestType.DNS_TCP_LOOKUP, None),
-        TargetHostTest('static.redhat.com', TestType.DNS_TCP_LOOKUP, None),
-
-        TargetHostTest('', TestType.LIVENESS_PROBE_ICMP, None),
-        TargetHostTest('', TestType.LIVENESS_PROBE_UDP, None),
-        # TargetHostTest('', TestType.LIVENESS_PROBE_TCP, None),
+        TargetHostTest('172.30.0.1', test_type=TestType.PORT_CHECK, port=443, bearer=None),
+        TargetHostTest('https://172.30.0.1/healthz',
+                       test_type=TestType.HTTP_READ, port=443, bearer=None),
+        # TargetHostTest('https://prometheus-k8s.openshift-monitoring.svc.cluster.local:9091/api/v1/query?query=test', test_type=TestType.HTTP_READ, port=443, bearer=token),
     ]
     signal.signal(signal.SIGINT, sigint_handler)
 
@@ -491,11 +407,6 @@ if __name__ == '__main__':
 
     for test in tests_to_run:
         threading.Thread(target=monitor_host, args=(test, delay)).start()
-        # monitor_host(test, delay)
 
-    node_info_updater = threading.Thread(target=poll_node_info)
-    node_info_updater.start()
-
-    writer = threading.Thread(target=bigquery_writer)
-    writer.start()
-    writer.join()
+    while True:
+        sleep(60)
