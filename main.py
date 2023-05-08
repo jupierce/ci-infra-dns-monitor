@@ -217,29 +217,29 @@ def _get_dns_pod_ip_addresses() -> List[str]:
 def prob_dns_pod_liveness_icmp(test_to_run: TargetHostTest) -> ResultRecord:
     global cluster_id, node_name, node_info, ci_workload_active, process_start_time, ci_workload
 
-    print(f'Checking DNS pod connectivity by ICMP...')
+    print(f'[ICMP] Checking DNS pod connectivity by ICMP...')
     query_start_time = timestamp_str()
     # Retrieve the DNS pods
     ip_addresses = _get_dns_pod_ip_addresses()
 
     # ICMP ping the DNS server
     reachable = []
-    print(f'Pinging DNS pods...')
+    print(f'[ICMP] Pinging DNS pods...')
     success = True
     for dns_server in ip_addresses:
-        print(f'Pinging {dns_server}')
+        print(f'[ICMP] Pinging {dns_server}')
         ans = sr1(IP(dst=dns_server) / ICMP(), timeout=1.0, verbose=1)
         if not ans:
-            print(f'Response: no answer')
+            print(f'[ICMP] Response: no answer')
         else:
-            print(f'Response: {ans.summary()}')
+            print(f'[ICMP] Response: {ans.summary()}')
         # retrieve the summary of the answers
         if ans and ans.haslayer(ICMP) and ans[ICMP].type == 0:
-            print(f"DNS server {dns_server} is reachable")
+            print(f"[ICMP] DNS server {dns_server} is reachable")
             reachable.append(dns_server)
         else:
-            print(f'DNS server {dns_server} is not reachable')
-        success = False
+            print(f'[ICMP] DNS server {dns_server} is not reachable')
+            success = False
     query_end_time = timestamp_str()
     return ResultRecord(
         schema_level=SCHEMA_LEVEL,
@@ -265,27 +265,27 @@ def prob_dns_pod_liveness_icmp(test_to_run: TargetHostTest) -> ResultRecord:
 
 def prob_dns_pod_liveness_udp(test_to_run: TargetHostTest) -> ResultRecord:
     global cluster_id, node_name, node_info, ci_workload_active, process_start_time, ci_workload
-    print(f'Checking DNS pod connectivity by UDP...')
+    print(f'[UDP] Checking DNS pod connectivity by UDP...')
     query_start_time = timestamp_str()
     # Retrieve the DNS pods
     ip_addresses = _get_dns_pod_ip_addresses()
 
     # UDP ping the DNS server
-    print(f'UDP pinging DNS servers...')
+    print(f'[UDP] Pinging DNS servers...')
     reachable = []
     success = True
     for dns_server in ip_addresses:
-        print(f'UDP pinging {dns_server}')
+        print(f'[UDP] pinging {dns_server}')
         ans = sr1(IP(dst=dns_server) / UDP(dport=0), timeout=1.0, verbose=1)
         if not ans:
-            print(f'Response: no answer')
+            print(f'[UDP] Response: no answer')
         else:
-            print(f'Response: {ans.summary()}')
+            print(f'[UDP] Response: {ans.summary()}')
         if ans and ans[ICMP].type == 3 and ans[ICMP].code == 3:
-            print(f'DNS server {dns_server} is reachable')
+            print(f'[UDP] DNS server {dns_server} is reachable')
             reachable.append(dns_server)
         else:
-            print(f'DNS server {dns_server} is not reachable')
+            print(f'[UDP] DNS server {dns_server} is not reachable')
             success = False
     query_end_time = timestamp_str()
     return ResultRecord(
@@ -312,27 +312,27 @@ def prob_dns_pod_liveness_udp(test_to_run: TargetHostTest) -> ResultRecord:
 
 def prob_dns_pod_liveness_tcp(test_to_run: TargetHostTest) -> ResultRecord:
     global cluster_id, node_name, node_info, ci_workload_active, process_start_time, ci_workload
-    print(f'Checking DNS pod connectivity by TCP...')
+    print(f'[TCP] Checking DNS pod connectivity by TCP...')
     query_start_time = timestamp_str()
     # Retrieve the DNS pods
     ip_addresses = _get_dns_pod_ip_addresses()
 
     # TCP ping the DNS server
-    print(f'TCP pinging DNS servers...')
+    print(f'[TCP] Pinging DNS servers...')
     reachable = []
     success = True
     for dns_server in ip_addresses:
-        print(f'TCP pinging {dns_server}')
+        print(f'[TCP] Pinging {dns_server}')
         ans = sr1(IP(dst=dns_server) / TCP(dport=53, flags='S'), timeout=1.0, verbose=1)
         if not ans:
-            print(f'Response: no answer')
+            print(f'[TCP] Response: no answer')
         else:
-            print(f'Response: {ans.summary()}')
+            print(f'[TCP] Response: {ans.summary()}')
         if ans and ans.haslayer(TCP) and ans[TCP].flags == 'SA':
-            print(f'DNS server {dns_server} is reachable')
+            print(f'[TCP] DNS server {dns_server} is reachable')
         else:
-            print(f'DNS server {dns_server} is not reachable')
-
+            print(f'[TCP] DNS server {dns_server} is not reachable')
+            success = False
     query_end_time = timestamp_str()
     return ResultRecord(
         schema_level=SCHEMA_LEVEL,
