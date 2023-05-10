@@ -228,7 +228,7 @@ def prob_dns_pod_liveness_icmp(test_to_run: TargetHostTest) -> ResultRecord:
     success = True
     for dns_server in ip_addresses:
         print(f'[ICMP] Pinging {dns_server}')
-        ans = sr1(IP(dst=dns_server) / ICMP(), timeout=1.0, verbose=1)
+        ans = sr1(IP(dst=dns_server) / ICMP(), timeout=3.0, verbose=1)
         if not ans:
             print(f'[ICMP] Response: no answer')
         else:
@@ -246,7 +246,7 @@ def prob_dns_pod_liveness_icmp(test_to_run: TargetHostTest) -> ResultRecord:
         cluster_id=cluster_id,
         node_name=node_name,
         process_start_time=process_start_time,
-        test_type=TestType.LIVENESS_PROBE_ICMP.value,
+        test_type=TestType.LIVENESS_PROBE_ICMP.value + test_variant,
         test_start_time=query_start_time,
         test_end_time=query_end_time,
         test_success=success,
@@ -276,7 +276,7 @@ def prob_dns_pod_liveness_udp(test_to_run: TargetHostTest) -> ResultRecord:
     success = True
     for dns_server in ip_addresses:
         print(f'[UDP] pinging {dns_server}')
-        ans = sr1(IP(dst=dns_server) / UDP(dport=0), timeout=1.0, verbose=1)
+        ans = sr1(IP(dst=dns_server) / UDP(dport=0), timeout=3.0, verbose=1)
         if not ans:
             print(f'[UDP] Response: no answer')
         else:
@@ -293,7 +293,7 @@ def prob_dns_pod_liveness_udp(test_to_run: TargetHostTest) -> ResultRecord:
         cluster_id=cluster_id,
         node_name=node_name,
         process_start_time=process_start_time,
-        test_type=TestType.LIVENESS_PROBE_UDP.value,
+        test_type=TestType.LIVENESS_PROBE_UDP.value + test_variant,
         test_start_time=query_start_time,
         test_end_time=query_end_time,
         test_success=success,
@@ -323,7 +323,7 @@ def prob_dns_pod_liveness_tcp(test_to_run: TargetHostTest) -> ResultRecord:
     success = True
     for dns_server in ip_addresses:
         print(f'[TCP] Pinging {dns_server}')
-        ans = sr1(IP(dst=dns_server) / TCP(dport=53, flags='S'), timeout=1.0, verbose=1)
+        ans = sr1(IP(dst=dns_server) / TCP(dport=53, flags='S'), timeout=3.0, verbose=1)
         if not ans:
             print(f'[TCP] Response: no answer')
         else:
@@ -339,7 +339,7 @@ def prob_dns_pod_liveness_tcp(test_to_run: TargetHostTest) -> ResultRecord:
         cluster_id=cluster_id,
         node_name=node_name,
         process_start_time=process_start_time,
-        test_type=TestType.LIVENESS_PROBE_TCP.value,
+        test_type=TestType.LIVENESS_PROBE_TCP.value + test_variant,
         test_start_time=query_start_time,
         test_end_time=query_end_time,
         test_success=success,
