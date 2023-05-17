@@ -29,6 +29,7 @@ SCHEMA_LEVEL = 6
 sigints_received: int = 0
 process_start_time: str
 cluster_id: str
+cluster_version: str = 'Unknown'
 node_name: str
 test_variant = os.getenv('TEST_VARIANT', '')
 
@@ -40,7 +41,7 @@ ci_workload_exp = re.compile(r'.*ci-workload=(\w+).*', flags=re.DOTALL)
 
 
 def refresh_node_info():
-    global node_info, ci_workload_active, ci_workload
+    global node_info, ci_workload_active, ci_workload, cluster_version
     try:
         node_model = oc.selector(f'node/{node_name}').object().model
         print(f'Successfully acquired node info for {node_name}')
@@ -52,6 +53,8 @@ def refresh_node_info():
         if not ci_workload:
             if node_model.metadata.labels['ci-workload']:
                 ci_workload = node_model.metadata.labels['ci-workload']
+
+        cluster_version = oc.selector('clusterversion/version').object().model.spec.desiredUpdate.version
     except Exception as e:
         print(f'Error get node information for {node_name}:\n{e}')
         node_info = str(e)
@@ -100,6 +103,7 @@ class ResultRecord(NamedTuple):
     node_info: Optional[str]
     ci_workload_active: Optional[bool]
     ci_workload: Optional[str]
+    cluster_version: Optional[str]
 
 
 record_q = queue.Queue()
@@ -149,6 +153,7 @@ def monitor_host_port(test_to_run: TargetHostTest) -> ResultRecord:
         node_info=node_info,
         ci_workload_active=ci_workload_active,
         ci_workload=ci_workload,
+        cluster_version=cluster_version,
     )
 
 
@@ -194,6 +199,7 @@ def monitor_dns_lookup(test_to_run: TargetHostTest) -> ResultRecord:
         node_info=node_info,
         ci_workload_active=ci_workload_active,
         ci_workload=ci_workload,
+        cluster_version=cluster_version,
     )
 
 
@@ -260,6 +266,7 @@ def prob_dns_pod_liveness_icmp(test_to_run: TargetHostTest) -> ResultRecord:
         node_info=node_info,
         ci_workload_active=ci_workload_active,
         ci_workload=ci_workload,
+        cluster_version=cluster_version,
     )
 
 
@@ -307,6 +314,7 @@ def prob_dns_pod_liveness_udp(test_to_run: TargetHostTest) -> ResultRecord:
         node_info=node_info,
         ci_workload_active=ci_workload_active,
         ci_workload=ci_workload,
+        cluster_version=cluster_version,
     )
 
 
@@ -353,6 +361,7 @@ def prob_dns_pod_liveness_tcp(test_to_run: TargetHostTest) -> ResultRecord:
         node_info=node_info,
         ci_workload_active=ci_workload_active,
         ci_workload=ci_workload,
+        cluster_version=cluster_version,
     )
 
 
@@ -402,6 +411,7 @@ def bigquery_writer():
                         node_info=node_info,
                         ci_workload_active=ci_workload_active,
                         ci_workload=ci_workload,
+                        cluster_version=cluster_version,
                     ))
 
                 else:
